@@ -1,5 +1,6 @@
 import sys
 import requests
+import threading
 from datetime import datetime, timedelta
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
@@ -7,6 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox,
                              QHeaderView, QGroupBox, QListWidget)
 from PyQt6.QtCore import Qt, QDate
+
+from api import run_server
 
 API_URL = "http://127.0.0.1:5000/api"
 
@@ -65,23 +68,25 @@ class WorkerRegistry(QWidget):
             "bio": self.bio_input.toPlainText()
         }
         try:
-            requests.post(f"{API_URL}/workers", json=data)
+            res = requests.post(f"{API_URL}/workers", json=data)
+            res.raise_for_status()
             self.name_input.clear()
             self.bio_input.clear()
             self.load_workers()
-        except requests.ConnectionError:
-            QMessageBox.critical(self, "Error", "Cannot connect to Flask Backend.")
+        except requests.exceptions.RequestException as e:
+            QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
     def load_workers(self):
         try:
             res = requests.get(f"{API_URL}/workers")
+            res.raise_for_status()
             workers = res.json()
             self.table.setRowCount(len(workers))
             for row, w in enumerate(workers):
                 self.table.setItem(row, 0, QTableWidgetItem(w['name']))
                 self.table.setItem(row, 1, QTableWidgetItem(w['role']))
                 self.table.setItem(row, 2, QTableWidgetItem(w['bio']))
-        except requests.ConnectionError:
+        except requests.exceptions.RequestException:
             pass
 
 
@@ -134,23 +139,25 @@ class ShiftPlanner(QWidget):
     def load_shifts(self):
         try:
             res = requests.get(f"{API_URL}/shifts")
+            res.raise_for_status()
             shifts = res.json()
             days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             for shift in shifts:
                 if shift.get("date") in days:
                     row = days.index(shift["date"])
                     self.table.setItem(row, 1, QTableWidgetItem(shift["worker_name"]))
-        except requests.ConnectionError:
+        except requests.exceptions.RequestException:
             pass
 
     def load_worker_combo(self):
         self.worker_combo.clear()
         try:
             res = requests.get(f"{API_URL}/workers")
+            res.raise_for_status()
             for w in res.json():
                 self.worker_combo.addItem(f"{w['name']} ({w['role']})", w)
             self.update_task_map()
-        except requests.ConnectionError:
+        except requests.exceptions.RequestException:
             self.worker_combo.addItem("Backend Offline", None)
 
     def update_task_map(self):
@@ -160,9 +167,10 @@ class ShiftPlanner(QWidget):
             role = worker_data.get('role')
             try:
                 res = requests.get(f"{API_URL}/tasks/{role}")
+                res.raise_for_status()
                 for task in res.json():
                     self.task_list.addItem(task)
-            except requests.ConnectionError:
+            except requests.exceptions.RequestException:
                 self.task_list.addItem("Cannot load tasks - API offline")
 
     def assign_shift(self):
@@ -178,10 +186,11 @@ class ShiftPlanner(QWidget):
                 "role": worker_data['role']
             }
             try:
-                requests.post(f"{API_URL}/shifts", json=data)
+                res = requests.post(f"{API_URL}/shifts", json=data)
+                res.raise_for_status()
                 self.table.setItem(current_row, 1, QTableWidgetItem(worker_data['name']))
-            except requests.ConnectionError:
-                QMessageBox.critical(self, "Error", "Cannot connect to Flask Backend.")
+            except requests.exceptions.RequestException as e:
+                QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -259,6 +268,10 @@ class MainWindow(QMainWindow):
             self.update_week_label()
 
 if __name__ == '__main__':
+    # Start the Flask backend server in a background daemon thread
+    api_thread = threading.Thread(target=run_server, daemon=True)
+    api_thread.start()
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
