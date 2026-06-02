@@ -6,8 +6,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
                              QTableWidget, QTableWidgetItem, QFormLayout, QLineEdit,
                              QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox,
-                             QHeaderView, QGroupBox, QListWidget)
-from PyQt6.QtCore import Qt, QDate
+                             QHeaderView, QGroupBox, QListWidget, QListWidgetItem,
+                             QTimeEdit)
+from PyQt6.QtCore import Qt, QDate, QTime
 
 from api import run_server
 
@@ -109,14 +110,27 @@ class ShiftPlanner(QWidget):
         plan_layout.addWidget(self.worker_combo)
         plan_layout.addWidget(refresh_btn)
         
+        # Time Picker Layout
+        time_layout = QHBoxLayout()
+        self.start_time = QTimeEdit()
+        self.start_time.setTime(QTime(9, 0))
+        self.end_time = QTimeEdit()
+        self.end_time.setTime(QTime(17, 0))
+        time_layout.addWidget(QLabel("Start:"))
+        time_layout.addWidget(self.start_time)
+        time_layout.addWidget(QLabel("End:"))
+        time_layout.addWidget(self.end_time)
+        plan_layout.addLayout(time_layout)
+        
         # Planner Table
-        self.table = QTableWidget(7, 2)
-        self.table.setHorizontalHeaderLabels(["Day", "Assigned Worker"])
+        self.table = QTableWidget(7, 3)
+        self.table.setHorizontalHeaderLabels(["Day", "Assigned Worker", "Tasks"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         for i, day in enumerate(days):
             self.table.setItem(i, 0, QTableWidgetItem(day))
             self.table.setItem(i, 1, QTableWidgetItem("Unassigned"))
+            self.table.setItem(i, 2, QTableWidgetItem(""))
         plan_layout.addWidget(self.table)
         
         assign_btn = QPushButton("Assign Selected Worker to Selected Day")
@@ -145,7 +159,11 @@ class ShiftPlanner(QWidget):
             for shift in shifts:
                 if shift.get("date") in days:
                     row = days.index(shift["date"])
-                    self.table.setItem(row, 1, QTableWidgetItem(shift["worker_name"]))
+                    worker_text = shift["worker_name"]
+                    if shift.get("start_time") and shift.get("end_time"):
+                        worker_text += f" ({shift['start_time']} - {shift['end_time']})"
+                    self.table.setItem(row, 1, QTableWidgetItem(worker_text))
+                    self.table.setItem(row, 2, QTableWidgetItem(shift.get("tasks", "")))
         except requests.exceptions.RequestException:
             pass
 
@@ -169,7 +187,10 @@ class ShiftPlanner(QWidget):
                 res = requests.get(f"{API_URL}/tasks/{role}")
                 res.raise_for_status()
                 for task in res.json():
-                    self.task_list.addItem(task)
+                    item = QListWidgetItem(task)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    self.task_list.addItem(item)
             except requests.exceptions.RequestException:
                 self.task_list.addItem("Cannot load tasks - API offline")
 
@@ -180,15 +201,31 @@ class ShiftPlanner(QWidget):
         worker_data = self.worker_combo.currentData()
         if worker_data:
             day = self.table.item(current_row, 0).text()
+            
+            start_time_str = self.start_time.time().toString("HH:mm")
+            end_time_str = self.end_time.time().toString("HH:mm")
+            
+            selected_tasks = []
+            for i in range(self.task_list.count()):
+                item = self.task_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    selected_tasks.append(item.text())
+            tasks_str = ", ".join(selected_tasks)
+            
             data = {
                 "date": day,
                 "worker_name": worker_data['name'],
-                "role": worker_data['role']
+                "role": worker_data['role'],
+                "start_time": start_time_str,
+                "end_time": end_time_str,
+                "tasks": tasks_str
             }
             try:
                 res = requests.post(f"{API_URL}/shifts", json=data)
                 res.raise_for_status()
-                self.table.setItem(current_row, 1, QTableWidgetItem(worker_data['name']))
+                worker_display = f"{worker_data['name']} ({start_time_str} - {end_time_str})"
+                self.table.setItem(current_row, 1, QTableWidgetItem(worker_display))
+                self.table.setItem(current_row, 2, QTableWidgetItem(tasks_str))
             except requests.exceptions.RequestException as e:
                 QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 

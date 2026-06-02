@@ -7,7 +7,11 @@ app = Flask(__name__)
 role_tasks = {
     "Owner": ["Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals"],
     "Manager": ["Inventory Check", "Staff Scheduling", "Store Inspection", "Customer Relations"],
-    "Worker": ["Stock Shelves", "Cashier Duties", "Aisle Cleaning", "Assist Customers"]
+    "Worker": [
+        "Stock Shelves", "Cashier Duties", "Aisle Cleaning", "Assist Customers",
+        "Keller Water Empty", "Paper Tonne Taking Outside", "Vegetable Room Water empty", 
+        "Vegtable Packing", "Product Inventory & Order List", "Product Expiry Date Checking", 
+        "Shelf Arranging and Feeling"]
 }
 
 def get_db_connection():
@@ -31,9 +35,19 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
             worker_name TEXT NOT NULL,
-            role TEXT NOT NULL
+            role TEXT NOT NULL,
+            start_time TEXT,
+            end_time TEXT,
+            tasks TEXT
         )
     ''')
+    
+    # Safely alter table to add new columns if the database file already exists
+    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT']:
+        try:
+            conn.execute(f'ALTER TABLE shifts ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
@@ -71,15 +85,18 @@ def manage_shifts():
     if request.method == 'POST':
         data = request.json
         cursor = conn.execute(
-            'INSERT INTO shifts (date, worker_name, role) VALUES (?, ?, ?)',
-            (data.get("date"), data.get("worker_name"), data.get("role"))
+            'INSERT INTO shifts (date, worker_name, role, start_time, end_time, tasks) VALUES (?, ?, ?, ?, ?, ?)',
+            (data.get("date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"))
         )
         conn.commit()
         shift = {
             "id": cursor.lastrowid,
             "date": data.get("date"),
             "worker_name": data.get("worker_name"),
-            "role": data.get("role")
+            "role": data.get("role"),
+            "start_time": data.get("start_time"),
+            "end_time": data.get("end_time"),
+            "tasks": data.get("tasks")
         }
         conn.close()
         return jsonify({"status": "success", "shift": shift}), 201
