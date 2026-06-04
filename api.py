@@ -5,7 +5,10 @@ app = Flask(__name__)
 
 # Task map defining the necessary work list relevant to each role
 role_tasks = {
-    "Owner": ["Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals"],
+    "Owner": ["Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals",
+              "Product Entry in Cash System", "Price Tag Generation", "Old Price Update", "Product Inventory & Order",
+              "Customer Bill Generation", "Vegetable Pickup Kelsterbach", "Veg-Fruit Purchase from Frischezentrum",
+              "Italian Vegetable Pickup from Frischezentrum", "Pickup Freezelog Products"],
     "Manager": ["Inventory Check", "Staff Scheduling", "Store Inspection", "Customer Relations"],
     "Worker": [
         "Stock Shelves", "Cashier Duties", "Aisle Cleaning", "Assist Customers",
@@ -38,12 +41,14 @@ def init_db():
             role TEXT NOT NULL,
             start_time TEXT,
             end_time TEXT,
-            tasks TEXT
+            tasks TEXT,
+            timesheet_data TEXT,
+            full_date TEXT
         )
     ''')
     
     # Safely alter table to add new columns if the database file already exists
-    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT']:
+    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT', 'timesheet_data TEXT', 'full_date TEXT']:
         try:
             conn.execute(f'ALTER TABLE shifts ADD COLUMN {col}')
         except sqlite3.OperationalError:
@@ -85,8 +90,8 @@ def manage_shifts():
     if request.method == 'POST':
         data = request.json
         cursor = conn.execute(
-            'INSERT INTO shifts (date, worker_name, role, start_time, end_time, tasks) VALUES (?, ?, ?, ?, ?, ?)',
-            (data.get("date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"))
+            'INSERT INTO shifts (date, full_date, worker_name, role, start_time, end_time, tasks, timesheet_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (data.get("date"), data.get("full_date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"), data.get("timesheet_data"))
         )
         conn.commit()
         shift = {
@@ -96,7 +101,9 @@ def manage_shifts():
             "role": data.get("role"),
             "start_time": data.get("start_time"),
             "end_time": data.get("end_time"),
-            "tasks": data.get("tasks")
+            "tasks": data.get("tasks"),
+            "full_date": data.get("full_date"),
+            "timesheet_data": data.get("timesheet_data")
         }
         conn.close()
         return jsonify({"status": "success", "shift": shift}), 201
@@ -104,6 +111,23 @@ def manage_shifts():
     shifts = conn.execute('SELECT * FROM shifts').fetchall()
     conn.close()
     return jsonify([dict(s) for s in shifts])
+
+@app.route('/api/shifts/<int:shift_id>', methods=['PUT'])
+def update_shift(shift_id):
+    conn = get_db_connection()
+    data = request.json
+    conn.execute('UPDATE shifts SET timesheet_data = ? WHERE id = ?', (data.get('timesheet_data'), shift_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
+
+@app.route('/api/shifts/<day>', methods=['DELETE'])
+def clear_shifts(day):
+    conn = get_db_connection()
+    conn.execute('DELETE FROM shifts WHERE date = ?', (day,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
 
 def run_server():
     # Initialize the database and create tables if they don't exist
