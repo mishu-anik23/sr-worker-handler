@@ -1,4 +1,5 @@
 import sys
+import os
 import requests
 import threading
 import json
@@ -7,11 +8,11 @@ from datetime import datetime, timedelta
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
                              QTableWidget, QTableWidgetItem, QFormLayout, QLineEdit,
-                             QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox,
+                             QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox, QFileDialog,
                              QHeaderView, QGroupBox, QListWidget, QListWidgetItem,
-                             QTimeEdit, QScrollArea, QProgressBar)
+                             QTimeEdit, QScrollArea, QProgressBar, QDateTimeEdit)
 from PyQt6.QtCore import Qt, QDate, QTime, QRectF
-from PyQt6.QtGui import QPainter, QColor, QFont
+from PyQt6.QtGui import QPainter, QColor, QFont, QPdfWriter, QPageLayout, QPageSize
 
 from api import run_server
 
@@ -33,6 +34,54 @@ class CalendarDialog(QDialog):
 
     def get_date(self):
         return self.calendar.selectedDate().toPyDate()
+
+
+class VoluntaryShiftDialog(QDialog):
+    def __init__(self, worker_name, tasks, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Add Voluntary Shift - {worker_name}")
+        self.setMinimumWidth(350)
+        layout = QVBoxLayout(self)
+        
+        form = QFormLayout()
+        self.start_dt = QDateTimeEdit(datetime.now())
+        self.start_dt.setCalendarPopup(True)
+        self.end_dt = QDateTimeEdit(datetime.now() + timedelta(hours=2))
+        self.end_dt.setCalendarPopup(True)
+        
+        form.addRow("Start:", self.start_dt)
+        form.addRow("End:", self.end_dt)
+        layout.addLayout(form)
+        
+        layout.addWidget(QLabel("Select Voluntary Tasks:"))
+        self.task_list = QListWidget()
+        for task in tasks:
+            item = QListWidgetItem(task)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.task_list.addItem(item)
+        layout.addWidget(self.task_list)
+        
+        btn_box = QHBoxLayout()
+        assign_btn = QPushButton("Assign Shift")
+        assign_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(assign_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+
+    def get_data(self):
+        selected_tasks = []
+        for i in range(self.task_list.count()):
+            item = self.task_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected_tasks.append(item.text())
+        return {
+            "start_dt": self.start_dt.dateTime().toPyDateTime(),
+            "end_dt": self.end_dt.dateTime().toPyDateTime(),
+            "tasks": ", ".join(selected_tasks)
+        }
 
 
 class OccupancyWidget(QWidget):
@@ -103,7 +152,11 @@ class OccupancyWidget(QWidget):
             w = ((e_clamped - s_clamped) / total_hours) * width
             y = margin_y + i * shift_height
             
-            color = role_colors.get(shift.get('role', ''), QColor("#757575"))
+            if shift.get('is_voluntary'):
+                color = QColor("#9C27B0") # Purple for Voluntary Shifts
+            else:
+                color = role_colors.get(shift.get('role', ''), QColor("#757575"))
+                
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
             rect_f = QRectF(x, y, w, shift_height)
@@ -237,9 +290,23 @@ class ShiftPlanner(QWidget):
         assign_btn.clicked.connect(self.assign_shift)
         plan_layout.addWidget(assign_btn)
         
+        vol_btn = QPushButton("Add Voluntary Shift")
+        vol_btn.clicked.connect(self.add_voluntary_shift)
+        plan_layout.addWidget(vol_btn)
+        
         reset_btn = QPushButton("Reset Selected Day")
         reset_btn.clicked.connect(self.reset_row)
         plan_layout.addWidget(reset_btn)
+        
+        # Export layout
+        export_layout = QHBoxLayout()
+        btn_export_png = QPushButton("Export as PNG")
+        btn_export_png.clicked.connect(self.export_png)
+        btn_export_pdf = QPushButton("Export as PDF")
+        btn_export_pdf.clicked.connect(self.export_pdf)
+        export_layout.addWidget(btn_export_png)
+        export_layout.addWidget(btn_export_pdf)
+        plan_layout.addLayout(export_layout)
         
         # Right Panel - Task Map
         task_group = QGroupBox("Role Necessary Work List")
@@ -288,6 +355,12 @@ class ShiftPlanner(QWidget):
             res.raise_for_status()
             shifts = res.json()
             
+            current_week_dates = []
+            for i in range(7):
+                item = self.table.item(i, 0)
+                if item and '\n' in item.text():
+                    current_week_dates.append(item.text().split('\n')[1])
+
             worker_hours = {}
             for s in shifts:
                 if s.get("full_date") and s.get("start_time") and s.get("end_time"):
@@ -295,18 +368,29 @@ class ShiftPlanner(QWidget):
                         dt = datetime.strptime(s["full_date"], "%Y-%m-%d")
                         w_name = s["worker_name"]
                         if w_name not in worker_hours:
-                            worker_hours[w_name] = {'weekly': 0.0, 'monthly': 0.0}
+                            worker_hours[w_name] = {'weekly': 0.0, 'monthly': 0.0, 'vol_weekly': 0.0, 'vol_monthly': 0.0}
                         hrs = self.time_to_float(s["end_time"]) - self.time_to_float(s["start_time"])
-                        if dt.month == self.current_date.month and dt.year == self.current_date.year:
-                            worker_hours[w_name]['monthly'] += hrs
-                        if dt.isocalendar()[1] == self.current_date.isocalendar()[1] and dt.year == self.current_date.year:
-                            worker_hours[w_name]['weekly'] += hrs
+                        is_vol = s.get("is_voluntary", 0)
+                        
+                        if is_vol:
+                            if dt.month == self.current_date.month and dt.year == self.current_date.year:
+                                worker_hours[w_name]['vol_monthly'] += hrs
+                            if dt.isocalendar()[1] == self.current_date.isocalendar()[1] and dt.year == self.current_date.year:
+                                worker_hours[w_name]['vol_weekly'] += hrs
+                        else:
+                            if dt.month == self.current_date.month and dt.year == self.current_date.year:
+                                worker_hours[w_name]['monthly'] += hrs
+                            if dt.isocalendar()[1] == self.current_date.isocalendar()[1] and dt.year == self.current_date.year:
+                                worker_hours[w_name]['weekly'] += hrs
                     except ValueError:
                         pass
             
             day_shifts = {day: [] for day in days}
             for shift in shifts:
                 if shift.get("date") in days:
+                    shift_full_date = shift.get("full_date")
+                    if shift_full_date and shift_full_date not in current_week_dates:
+                        continue
                     day_shifts[shift["date"]].append(shift)
                     
             for day, day_shift_list in day_shifts.items():
@@ -314,17 +398,22 @@ class ShiftPlanner(QWidget):
                     continue
                 row = days.index(day)
                 
-                is_sunday = (day == "Sunday")
-                start_hour = 14.0 if is_sunday else 10.0
-                end_hour = 21.0 if is_sunday else 22.0
+                start_hour = 8.0
+                end_hour = 22.0
+                for s in day_shift_list:
+                    if s.get("start_time"):
+                        start_hour = min(start_hour, int(self.time_to_float(s["start_time"])))
+                    if s.get("end_time"):
+                        end_hour = max(end_hour, int(self.time_to_float(s["end_time"])) + 1)
                 
                 parsed_shifts = []
                 for s in day_shift_list:
-                    wh = worker_hours.get(s['worker_name'], {})
+                    wh = worker_hours.get(s['worker_name'], {'weekly': 0.0, 'monthly': 0.0, 'vol_weekly': 0.0, 'vol_monthly': 0.0})
+                    type_str = "Voluntary" if s.get("is_voluntary") else "Regular"
                     tooltip = (f"Worker: {s['worker_name']}\nRole: {s['role']}\n"
-                               f"Shift: {s.get('start_time')} - {s.get('end_time')}\n"
-                               f"Weekly Hours: {wh.get('weekly', 0):.1f}\n"
-                               f"Monthly Hours: {wh.get('monthly', 0):.1f}")
+                               f"Shift: {s.get('start_time')} - {s.get('end_time')} ({type_str})\n"
+                               f"Weekly Reg: {wh.get('weekly', 0):.1f}h | Vol: {wh.get('vol_weekly', 0):.1f}h\n"
+                               f"Monthly Reg: {wh.get('monthly', 0):.1f}h | Vol: {wh.get('vol_monthly', 0):.1f}h")
                                
                     if s.get("start_time") and s.get("end_time"):
                         parsed_shifts.append({
@@ -332,7 +421,8 @@ class ShiftPlanner(QWidget):
                             'end': self.time_to_float(s["end_time"]),
                             'role': s.get('role', ''),
                             'name': s.get('worker_name', ''),
-                            'tooltip': tooltip
+                            'tooltip': tooltip,
+                            'is_voluntary': s.get("is_voluntary", 0)
                         })
                 
                 if parsed_shifts:
@@ -345,7 +435,8 @@ class ShiftPlanner(QWidget):
                 tasks_layout.setContentsMargins(5, 5, 5, 5)
                 for s in day_shift_list:
                     if s.get("tasks"):
-                        lbl = QLabel(f"<b>[{s['worker_name']}]</b> {s['tasks']}")
+                        vol_mark = "(Vol) " if s.get("is_voluntary") else ""
+                        lbl = QLabel(f"<b>[{s['worker_name']}]</b> {vol_mark}{s['tasks']}")
                         lbl.setWordWrap(True)
                         tasks_layout.addWidget(lbl)
                 tasks_layout.addStretch()
@@ -393,55 +484,139 @@ class ShiftPlanner(QWidget):
 
     def assign_shift(self):
         current_row = self.table.currentRow()
-        if current_row < 0: return
+        if current_row < 0:
+            QMessageBox.warning(self, "Warning", "Please select a day (row) in the table first.")
+            return
         
         worker_data = self.worker_combo.currentData()
-        if worker_data:
-            day_text = self.table.item(current_row, 0).text()
-            day = day_text.split('\n')[0]
-            full_date_str = day_text.split('\n')[1] if '\n' in day_text else ""
+        if not worker_data:
+            QMessageBox.warning(self, "Warning", "Please select a worker first.")
+            return
             
-            start_time_str = self.start_time.time().toString("HH:mm")
-            end_time_str = self.end_time.time().toString("HH:mm")
+        day_text = self.table.item(current_row, 0).text()
+        day = day_text.split('\n')[0]
+        full_date_str = day_text.split('\n')[1] if '\n' in day_text else ""
+        
+        start_time_str = self.start_time.time().toString("HH:mm")
+        end_time_str = self.end_time.time().toString("HH:mm")
+        
+        selected_tasks = []
+        for i in range(self.task_list.count()):
+            item = self.task_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected_tasks.append(item.text())
+                
+        if not selected_tasks:
+            QMessageBox.warning(self, "Warning", "Please select at least one task for this shift.")
+            return
             
-            selected_tasks = []
-            for i in range(self.task_list.count()):
-                item = self.task_list.item(i)
-                if item.checkState() == Qt.CheckState.Checked:
-                    selected_tasks.append(item.text())
-            tasks_str = ", ".join(selected_tasks)
+        tasks_str = ", ".join(selected_tasks)
+        
+        data = {
+            "date": day,
+            "full_date": full_date_str,
+            "worker_name": worker_data['name'],
+            "role": worker_data['role'],
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "tasks": tasks_str
+        }
+        try:
+            res = requests.post(f"{API_URL}/shifts", json=data, timeout=3)
+            res.raise_for_status()
+            self.load_shifts()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error assigning shift: {e}")
+            QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
+
+    def add_voluntary_shift(self):
+        worker_data = self.worker_combo.currentData()
+        if not worker_data:
+            QMessageBox.warning(self, "Warning", "Please select a worker first.")
+            return
+            
+        if worker_data.get('role') not in ['Owner', 'Manager']:
+            QMessageBox.warning(self, "Permission Denied", "Voluntary shifts can only be assigned to Owner or Manager roles.")
+            return
+            
+        tasks = [self.task_list.item(i).text() for i in range(self.task_list.count())]
+        dialog = VoluntaryShiftDialog(worker_data['name'], tasks, self)
+        
+        if dialog.exec():
+            data_out = dialog.get_data()
+            start_dt = data_out['start_dt']
+            end_dt = data_out['end_dt']
             
             data = {
-                "date": day,
-                "full_date": full_date_str,
+                "date": start_dt.strftime("%A"),
+                "full_date": start_dt.strftime("%Y-%m-%d"),
                 "worker_name": worker_data['name'],
                 "role": worker_data['role'],
-                "start_time": start_time_str,
-                "end_time": end_time_str,
-                "tasks": tasks_str
+                "start_time": start_dt.strftime("%H:%M"),
+                "end_time": end_dt.strftime("%H:%M"),
+                "tasks": data_out['tasks'],
+                "is_voluntary": 1
             }
+            
             try:
                 res = requests.post(f"{API_URL}/shifts", json=data, timeout=3)
                 res.raise_for_status()
                 self.load_shifts()
             except requests.exceptions.RequestException as e:
-                logging.error(f"Error assigning shift: {e}")
+                logging.error(f"Error assigning voluntary shift: {e}")
                 QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
     def reset_row(self):
         current_row = self.table.currentRow()
-        if current_row < 0: return
+        if current_row < 0:
+            QMessageBox.warning(self, "Warning", "Please select a day (row) in the table first.")
+            return
+            
         day_text = self.table.item(current_row, 0).text()
         day = day_text.split('\n')[0]
+        full_date_str = day_text.split('\n')[1] if '\n' in day_text else ""
         
         try:
-            res = requests.delete(f"{API_URL}/shifts/{day}", timeout=3)
+            res = requests.delete(f"{API_URL}/shifts/{day}?full_date={full_date_str}", timeout=3)
             res.raise_for_status()
             self.load_shifts()
         except requests.exceptions.RequestException as e:
             logging.error(f"Error resetting row for {day}: {e}")
             QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
+    def _get_export_dir(self):
+        export_dir = os.path.join(os.getcwd(), "exports")
+        if not os.path.exists(export_dir):
+            os.makedirs(export_dir)
+        return export_dir
+
+    def export_png(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PNG", self._get_export_dir(), "PNG Image (*.png)")
+        if file_path:
+            pixmap = self.table.grab()
+            pixmap.save(file_path, "PNG")
+            QMessageBox.information(self, "Success", f"Shift plan exported as PNG to:\n{file_path}")
+
+    def export_pdf(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PDF", self._get_export_dir(), "PDF Document (*.pdf)")
+        if file_path:
+            pixmap = self.table.grab()
+            writer = QPdfWriter(file_path)
+            
+            page_layout = QPageLayout(QPageSize(QPageSize.PageSizeId.A4), 
+                                      QPageLayout.Orientation.Landscape, 
+                                      QPageLayout.Unit.Millimeter)
+            writer.setPageLayout(page_layout)
+            
+            painter = QPainter(writer)
+            rect = painter.viewport()
+            size = pixmap.size()
+            size.scale(rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            painter.setViewport(rect.x(), rect.y(), size.width(), size.height())
+            painter.setWindow(pixmap.rect())
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            QMessageBox.information(self, "Success", f"Shift plan exported as PDF to:\n{file_path}")
 
 class EmployeeTimesheet(QWidget):
     def __init__(self):
@@ -534,7 +709,8 @@ class EmployeeTimesheet(QWidget):
             res.raise_for_status()
             for s in res.json():
                 if s.get('worker_name') == worker_name:
-                    disp = f"{s.get('full_date', s.get('date'))} ({s.get('start_time')} - {s.get('end_time')})"
+                    type_prefix = "[Vol] " if s.get('is_voluntary') else ""
+                    disp = f"{type_prefix}{s.get('full_date', s.get('date'))} ({s.get('start_time')} - {s.get('end_time')})"
                     self.shift_combo.addItem(disp, s)
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to load shifts for timesheet: {e}")
@@ -693,8 +869,8 @@ class StatisticsWidget(QWidget):
         refresh_btn.clicked.connect(self.load_stats)
         layout.addWidget(refresh_btn)
         
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Worker", "Total Hours", "Completed Tasks", "Pending/Working Tasks"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Worker", "Regular Hours", "Voluntary Hours", "Completed Tasks", "Pending/Working Tasks"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
         self.load_stats()
@@ -710,13 +886,16 @@ class StatisticsWidget(QWidget):
                 w = s.get('worker_name')
                 if not w: continue
                 if w not in stats:
-                    stats[w] = {'hours': 0.0, 'completed': 0, 'pending': 0}
+                    stats[w] = {'reg_hours': 0.0, 'vol_hours': 0.0, 'completed': 0, 'pending': 0}
                     
                 try:
                     h1, m1 = map(int, s['start_time'].split(':'))
                     h2, m2 = map(int, s['end_time'].split(':'))
                     hrs = (h2 + m2/60.0) - (h1 + m1/60.0)
-                    stats[w]['hours'] += hrs
+                    if s.get('is_voluntary'):
+                        stats[w]['vol_hours'] += hrs
+                    else:
+                        stats[w]['reg_hours'] += hrs
                 except:
                     pass
                     
@@ -742,9 +921,10 @@ class StatisticsWidget(QWidget):
             self.table.setRowCount(len(stats))
             for row, (worker, data) in enumerate(stats.items()):
                 self.table.setItem(row, 0, QTableWidgetItem(worker))
-                self.table.setItem(row, 1, QTableWidgetItem(f"{data['hours']:.1f} hr(s)"))
-                self.table.setItem(row, 2, QTableWidgetItem(str(data['completed'])))
-                self.table.setItem(row, 3, QTableWidgetItem(str(data['pending'])))
+                self.table.setItem(row, 1, QTableWidgetItem(f"{data['reg_hours']:.1f} hr(s)"))
+                self.table.setItem(row, 2, QTableWidgetItem(f"{data['vol_hours']:.1f} hr(s)"))
+                self.table.setItem(row, 3, QTableWidgetItem(str(data['completed'])))
+                self.table.setItem(row, 4, QTableWidgetItem(str(data['pending'])))
                 
         except Exception as e:
             logging.error(f"Failed to load statistics: {e}")
@@ -831,6 +1011,7 @@ class MainWindow(QMainWindow):
         self.week_label.setText(f"Current Plan: Calendar Week {week_num}")
         if hasattr(self, 'shift_planner'):
             self.shift_planner.update_dates(self.current_date)
+            self.shift_planner.load_shifts()
 
     def open_calendar(self):
         dialog = CalendarDialog(self)

@@ -5,16 +5,20 @@ app = Flask(__name__)
 
 # Task map defining the necessary work list relevant to each role
 role_tasks = {
-    "Owner": ["Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals",
-              "Product Entry in Cash System", "Price Tag Generation", "Old Price Update", "Product Inventory & Order",
-              "Customer Bill Generation", "Vegetable Pickup Kelsterbach", "Veg-Fruit Purchase from Frischezentrum",
-              "Italian Vegetable Pickup from Frischezentrum", "Pickup Freezelog Products"],
+    "Owner": ["Cashier Duties", "Cash Closing", "Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals",
+              "Product Entry in Cash System", "Product Entry in Website", "Price Tag Generation", "Old Price Update",
+              "Product Inventory & Order", "Customer Bill Generation", "Vegetable Pickup Kelsterbach",
+              "Veg-Fruit Purchase from Frischezentrum", "Italian Vegetable Pickup from Frischezentrum",
+              "Freezelog Products Pickup", "BD Fruit-Veg Pickup From Frankfurt Airpot",
+              "Business Relations / Price Query With INTL Exporters", "Frankfurt Zollamt / CNF Handling",
+              "Customer Relations", "Customer Order Home Delivery", "Vendor/Worker Bill Payment",
+              "Store Inspection", "Staff Scheduling", "Empty Carton/Basket Throwing"],
     "Manager": ["Inventory Check", "Staff Scheduling", "Store Inspection", "Customer Relations"],
     "Worker": [
-        "Stock Shelves", "Cashier Duties", "Aisle Cleaning", "Assist Customers",
-        "Keller Water Empty", "Paper Tonne Taking Outside", "Vegetable Room Water empty", 
-        "Vegtable Packing", "Product Inventory & Order List", "Product Expiry Date Checking", 
-        "Shelf Arranging and Feeling"]
+        "Stock Shelves/Floor Acitiviteis", "Cashier Duties", "Aisle Cleaning", "Vegetable Room Cleaning",
+        "Vegtable Checking/Packing", "Fish/Meat Cut Machine Clean", "Assist Customers", "Keller Water Empty",
+        "Paper Tonne Taking Outside", "Vegetable Room Water Empty", "Product Inventory & Order List",
+        "Product Expiry Date Checking", "Freezelog Products Pickup"]
 }
 
 def get_db_connection():
@@ -43,12 +47,13 @@ def init_db():
             end_time TEXT,
             tasks TEXT,
             timesheet_data TEXT,
-            full_date TEXT
+            full_date TEXT,
+            is_voluntary BOOLEAN DEFAULT 0
         )
     ''')
     
     # Safely alter table to add new columns if the database file already exists
-    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT', 'timesheet_data TEXT', 'full_date TEXT']:
+    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT', 'timesheet_data TEXT', 'full_date TEXT', 'is_voluntary BOOLEAN DEFAULT 0']:
         try:
             conn.execute(f'ALTER TABLE shifts ADD COLUMN {col}')
         except sqlite3.OperationalError:
@@ -90,8 +95,8 @@ def manage_shifts():
     if request.method == 'POST':
         data = request.json
         cursor = conn.execute(
-            'INSERT INTO shifts (date, full_date, worker_name, role, start_time, end_time, tasks, timesheet_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            (data.get("date"), data.get("full_date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"), data.get("timesheet_data"))
+            'INSERT INTO shifts (date, full_date, worker_name, role, start_time, end_time, tasks, timesheet_data, is_voluntary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (data.get("date"), data.get("full_date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"), data.get("timesheet_data"), data.get("is_voluntary", 0))
         )
         conn.commit()
         shift = {
@@ -103,7 +108,8 @@ def manage_shifts():
             "end_time": data.get("end_time"),
             "tasks": data.get("tasks"),
             "full_date": data.get("full_date"),
-            "timesheet_data": data.get("timesheet_data")
+            "timesheet_data": data.get("timesheet_data"),
+            "is_voluntary": data.get("is_voluntary", 0)
         }
         conn.close()
         return jsonify({"status": "success", "shift": shift}), 201
@@ -123,8 +129,12 @@ def update_shift(shift_id):
 
 @app.route('/api/shifts/<day>', methods=['DELETE'])
 def clear_shifts(day):
+    full_date = request.args.get('full_date')
     conn = get_db_connection()
-    conn.execute('DELETE FROM shifts WHERE date = ?', (day,))
+    if full_date:
+        conn.execute('DELETE FROM shifts WHERE date = ? AND full_date = ?', (day, full_date))
+    else:
+        conn.execute('DELETE FROM shifts WHERE date = ?', (day,))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
