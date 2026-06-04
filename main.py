@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QFormLayout, QLineEdit,
                              QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox,
                              QHeaderView, QGroupBox, QListWidget, QListWidgetItem,
-                             QTimeEdit, QScrollArea)
+                             QTimeEdit, QScrollArea, QProgressBar)
 from PyQt6.QtCore import Qt, QDate, QTime, QRectF
 from PyQt6.QtGui import QPainter, QColor, QFont
 
@@ -465,14 +465,45 @@ class EmployeeTimesheet(QWidget):
         layout.addWidget(QLabel("Select Active Shift Assignment:"))
         layout.addWidget(self.shift_combo)
         
+        # Progress Bar Layout
+        prog_layout = QHBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_label = QLabel("Hours: 0.0 / 0.0")
+        prog_layout.addWidget(QLabel("Shift Progression:"))
+        prog_layout.addWidget(self.progress_bar)
+        prog_layout.addWidget(self.progress_label)
+        layout.addLayout(prog_layout)
+        
         # Tasks Form
         self.tasks_layout = QVBoxLayout()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         inner = QWidget()
+        inner.setMinimumWidth(850) # Ensures horizontal scrollability
         inner.setLayout(self.tasks_layout)
         scroll.setWidget(inner)
         layout.addWidget(scroll)
+        
+        # Extra Hours Section
+        self.extra_group = QGroupBox("Extra Hours Request")
+        extra_layout = QHBoxLayout()
+        self.extra_hours = QComboBox()
+        self.extra_hours.setEditable(True)
+        self.extra_hours.addItems([str(x/2.0) for x in range(0, 11)])
+        self.extra_purpose = QLineEdit()
+        self.extra_purpose.setPlaceholderText("Purpose / Reason")
+        self.extra_ask_btn = QPushButton("Ask for Approval")
+        self.extra_ask_btn.clicked.connect(self.ask_approval)
+        self.extra_status_lbl = QLabel("Status: Not Requested")
+        self.extra_status_lbl.setStyleSheet("font-weight: bold;")
+        extra_layout.addWidget(QLabel("Extra Hours:"))
+        extra_layout.addWidget(self.extra_hours)
+        extra_layout.addWidget(self.extra_purpose)
+        extra_layout.addWidget(self.extra_ask_btn)
+        extra_layout.addWidget(self.extra_status_lbl)
+        self.extra_group.setLayout(extra_layout)
+        layout.addWidget(self.extra_group)
         
         # Save button
         self.save_btn = QPushButton("Save Timesheet Log")
@@ -481,6 +512,7 @@ class EmployeeTimesheet(QWidget):
         
         self.current_shift_id = None
         self.task_widgets = []
+        self.total_assigned_hours = 0.0
         self.load_data()
         
     def load_data(self):
@@ -526,6 +558,15 @@ class EmployeeTimesheet(QWidget):
         if not shift_data: return
         self.current_shift_id = shift_data.get('id')
         
+        # Calculate assigned hours
+        try:
+            h1, m1 = map(int, shift_data.get('start_time', '00:00').split(':'))
+            h2, m2 = map(int, shift_data.get('end_time', '00:00').split(':'))
+            self.total_assigned_hours = (h2 + m2/60.0) - (h1 + m1/60.0)
+            if self.total_assigned_hours < 0: self.total_assigned_hours = 0.0
+        except Exception:
+            self.total_assigned_hours = 8.0 # Fallback
+            
         tasks_str = shift_data.get('tasks', '')
         if not tasks_str: return
         tasks = [t.strip() for t in tasks_str.split(',') if t.strip()]
@@ -537,9 +578,25 @@ class EmployeeTimesheet(QWidget):
             except:
                 pass
         
+        # Header for columns
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("<b>Task</b>"), 3)
+        header_row.addWidget(QLabel("<b>Hrs Spent</b>"), 1)
+        header_row.addWidget(QLabel("<b>Status</b>"), 1)
+        header_row.addWidget(QLabel("<b>Comment</b>"), 2)
+        self.tasks_layout.addLayout(header_row)
+
         for task in tasks:
             row = QHBoxLayout()
-            row.addWidget(QLabel(task), 2)
+            row.addWidget(QLabel(task), 3)
+            
+            hours_combo = QComboBox()
+            hours_combo.setEditable(True)
+            hours_combo.addItems(["0.0"] + [str(x/2.0) for x in range(1, 11)])
+            saved_hours = timesheet_data.get(task, {}).get('hours', '0.0')
+            hours_combo.setCurrentText(str(saved_hours))
+            hours_combo.currentTextChanged.connect(self.update_progress)
+            row.addWidget(hours_combo, 1)
             
             status_combo = QComboBox()
             status_combo.addItems(["Not Done", "Working", "Done"])
@@ -553,18 +610,66 @@ class EmployeeTimesheet(QWidget):
             row.addWidget(comment_input, 2)
             
             self.tasks_layout.addLayout(row)
-            self.task_widgets.append((task, status_combo, comment_input))
-            self.tasks_layout.addStretch()
+            self.task_widgets.append((task, hours_combo, status_combo, comment_input))
             
+        self.tasks_layout.addStretch()
+        
+        extra_data = timesheet_data.get('__extra_hours__', {})
+        self.extra_hours.setCurrentText(str(extra_data.get('hours', '0.0')))
+        self.extra_purpose.setText(extra_data.get('purpose', ''))
+        self.extra_status_lbl.setText(f"Status: {extra_data.get('status', 'Not Requested')}")
+        
+        self.update_progress()
+
+    def update_progress(self, *args):
+        total_spent = 0.0
+        for _, h_combo, _, _ in self.task_widgets:
+            try:
+                total_spent += float(h_combo.currentText())
+            except ValueError:
+                pass
+                
+        self.progress_label.setText(f"Hours: {total_spent:.1f} / {self.total_assigned_hours:.1f}")
+        
+        max_val = int(self.total_assigned_hours * 10)
+        spent_val = int(total_spent * 10)
+        
+        self.progress_bar.setMaximum(max_val if max_val > 0 else 100)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat(f"{total_spent:.1f} / {self.total_assigned_hours:.1f} hrs")
+        
+        base_style = "QProgressBar { text-align: center; border: 1px solid #BDBDBD; border-radius: 4px; color: black; font-weight: bold; background-color: #FAFAFA; }"
+        if total_spent > self.total_assigned_hours:
+            self.progress_bar.setValue(max_val)
+            self.progress_bar.setStyleSheet(base_style + " QProgressBar::chunk { background-color: #D32F2F; border-radius: 4px; }")
+        elif total_spent == self.total_assigned_hours and self.total_assigned_hours > 0:
+            self.progress_bar.setValue(spent_val)
+            self.progress_bar.setStyleSheet(base_style + " QProgressBar::chunk { background-color: #388E3C; border-radius: 4px; }")
+        else:
+            self.progress_bar.setValue(spent_val)
+            self.progress_bar.setStyleSheet(base_style + " QProgressBar::chunk { background-color: #1976D2; border-radius: 4px; }")
+            
+    def ask_approval(self):
+        self.extra_status_lbl.setText("Status: Pending Approval")
+        self.extra_status_lbl.setStyleSheet("font-weight: bold; color: #1976D2;")
+        self.save_timesheet()
+
     def save_timesheet(self):
         if not self.current_shift_id: return
         
         ts_data = {}
-        for task, combo, line_edit in self.task_widgets:
+        for task, h_combo, s_combo, line_edit in self.task_widgets:
             ts_data[task] = {
-                'status': combo.currentText(),
+                'hours': h_combo.currentText(),
+                'status': s_combo.currentText(),
                 'comment': line_edit.text()
             }
+            
+        ts_data['__extra_hours__'] = {
+            'hours': self.extra_hours.currentText(),
+            'purpose': self.extra_purpose.text(),
+            'status': self.extra_status_lbl.text().replace("Status: ", "")
+        }
             
         try:
             res = requests.put(f"{API_URL}/shifts/{self.current_shift_id}", 
@@ -620,6 +725,8 @@ class StatisticsWidget(QWidget):
                     try:
                         ts_data = json.loads(ts_str)
                         for task, info in ts_data.items():
+                            if task == '__extra_hours__':
+                                continue
                             if info.get('status') == 'Done':
                                 stats[w]['completed'] += 1
                             else:
