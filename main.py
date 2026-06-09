@@ -10,8 +10,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QFormLayout, QLineEdit,
                              QComboBox, QTextEdit, QCalendarWidget, QDialog, QMessageBox, QFileDialog,
                              QHeaderView, QGroupBox, QListWidget, QListWidgetItem,
-                             QTimeEdit, QScrollArea, QProgressBar, QDateTimeEdit)
-from PyQt6.QtCore import Qt, QDate, QTime, QRectF
+                             QTimeEdit, QScrollArea, QProgressBar, QDateTimeEdit, QFrame, QLayout, QSizePolicy)
+from PyQt6.QtCore import Qt, QDate, QTime, QRectF, pyqtSignal, QPoint, QSize, QRect, QMarginsF
 from PyQt6.QtGui import QPainter, QColor, QFont, QPdfWriter, QPageLayout, QPageSize
 
 from api import run_server
@@ -19,6 +19,120 @@ from api import run_server
 API_URL = "http://127.0.0.1:5000/api"
 
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=-1, hSpacing=-1, vSpacing=-1, alignment=Qt.AlignmentFlag.AlignLeft):
+        super().__init__(parent)
+        self._hSpace = hSpacing
+        self._vSpace = vSpacing
+        self._alignment = alignment
+        self.itemList = []
+        if margin > -1:
+            self.setContentsMargins(margin, margin, margin, margin)
+            
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+            
+    def addItem(self, item):
+        self.itemList.append(item)
+        
+    def horizontalSpacing(self):
+        if self._hSpace >= 0:
+            return self._hSpace
+        return self.spacing()
+        
+    def verticalSpacing(self):
+        if self._vSpace >= 0:
+            return self._vSpace
+        return self.spacing()
+        
+    def count(self):
+        return len(self.itemList)
+        
+    def itemAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList[index]
+        return None
+        
+    def takeAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList.pop(index)
+        return None
+        
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+        
+    def hasHeightForWidth(self):
+        return True
+        
+    def heightForWidth(self, width):
+        return self.doLayout(QRect(0, 0, width, 0), True)
+        
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self.doLayout(rect, False)
+        
+    def sizeHint(self):
+        return self.minimumSize()
+        
+    def minimumSize(self):
+        size = QSize()
+        for item in self.itemList:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+        
+    def doLayout(self, rect, testOnly):
+        x = rect.x()
+        y = rect.y()
+        lineHeight = 0
+        
+        rows = []
+        current_row = []
+        row_width = 0
+        
+        for item in self.itemList:
+            wid = item.widget()
+            spaceX = self.horizontalSpacing() if wid else 0
+            
+            item_w = item.sizeHint().width()
+            item_h = item.sizeHint().height()
+            
+            if row_width + item_w > rect.width() and current_row:
+                rows.append((current_row, row_width - spaceX, lineHeight))
+                current_row = []
+                row_width = 0
+                lineHeight = 0
+                
+            current_row.append(item)
+            row_width += item_w + spaceX
+            lineHeight = max(lineHeight, item_h)
+            
+        if current_row:
+            rows.append((current_row, row_width - spaceX, lineHeight))
+            
+        y = rect.y()
+        for row, r_width, r_height in rows:
+            if self._alignment == Qt.AlignmentFlag.AlignRight:
+                x = rect.right() - r_width + 1
+            else:
+                x = rect.x()
+                
+            for item in row:
+                wid = item.widget()
+                spaceX = self.horizontalSpacing() if wid else 0
+                if not testOnly:
+                    item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+                x += item.sizeHint().width() + spaceX
+            y += r_height + self.verticalSpacing()
+            
+        if rows:
+            y -= self.verticalSpacing()
+            
+        return y - rect.y()
 
 class CalendarDialog(QDialog):
     def __init__(self, parent=None):
@@ -84,13 +198,122 @@ class VoluntaryShiftDialog(QDialog):
         }
 
 
+class EditShiftDialog(QDialog):
+    def __init__(self, shift_data, workers, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Shift")
+        self.setMinimumWidth(400)
+        self.shift_data = shift_data
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self.worker_combo = QComboBox()
+        current_idx = 0
+        for i, w in enumerate(workers):
+            self.worker_combo.addItem(f"{w['name']} ({w['role']})", w)
+            if w['name'] == shift_data.get('name'):
+                current_idx = i
+        self.worker_combo.currentIndexChanged.connect(self.update_task_list)
+        
+        time_intervals = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+        self.start_time = QComboBox()
+        self.start_time.addItems(time_intervals)
+        self.start_time.setCurrentText(shift_data.get('start_time', '09:00'))
+        
+        self.end_time = QComboBox()
+        self.end_time.addItems(time_intervals)
+        self.end_time.setCurrentText(shift_data.get('end_time', '17:00'))
+        
+        form.addRow("Worker:", self.worker_combo)
+        form.addRow("Start:", self.start_time)
+        form.addRow("End:", self.end_time)
+        layout.addLayout(form)
+        
+        layout.addWidget(QLabel("Tasks:"))
+        self.task_list = QListWidget()
+        layout.addWidget(self.task_list)
+        
+        # Force an update for tasks relative to the selected worker initially
+        self.worker_combo.setCurrentIndex(-1)
+        self.worker_combo.setCurrentIndex(current_idx)
+        
+        selected_tasks = [t.strip() for t in shift_data.get('tasks', '').split(',')]
+        for i in range(self.task_list.count()):
+            item = self.task_list.item(i)
+            if item.text() in selected_tasks:
+                item.setCheckState(Qt.CheckState.Checked)
+                
+        btn_box = QHBoxLayout()
+        self.update_btn = QPushButton("Update Shift")
+        self.update_btn.clicked.connect(self.accept)
+        
+        self.delete_btn = QPushButton("Delete Shift")
+        self.delete_btn.setStyleSheet("background-color: #D32F2F;")
+        self.delete_btn.clicked.connect(self.delete_shift)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btn_box.addWidget(self.update_btn)
+        btn_box.addWidget(self.delete_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+        
+        self.action = 'update'
+        
+    def update_task_list(self):
+        self.task_list.clear()
+        worker_data = self.worker_combo.currentData()
+        if worker_data:
+            role = worker_data.get('role')
+            try:
+                res = requests.get(f"{API_URL}/tasks/{role}", timeout=3)
+                res.raise_for_status()
+                for task in res.json():
+                    item = QListWidgetItem(task)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    self.task_list.addItem(item)
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to load tasks for role {role}: {e}")
+                self.task_list.addItem("Cannot load tasks - API offline")
+                
+    def delete_shift(self):
+        reply = QMessageBox.question(self, "Confirm Delete", "Are you sure you want to delete this shift?", 
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.action = 'delete'
+            self.accept()
+
+    def get_data(self):
+        worker_data = self.worker_combo.currentData()
+        selected_tasks = []
+        for i in range(self.task_list.count()):
+            item = self.task_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected_tasks.append(item.text())
+                
+        return {
+            'action': self.action,
+            'id': self.shift_data.get('id'),
+            'worker_name': worker_data['name'] if worker_data else "",
+            'role': worker_data['role'] if worker_data else "",
+            'start_time': self.start_time.currentText(),
+            'end_time': self.end_time.currentText(),
+            'tasks': ", ".join(selected_tasks)
+        }
+
+
 class OccupancyWidget(QWidget):
+    shiftClicked = pyqtSignal(dict)
+
     def __init__(self, start_hour, end_hour, shifts, parent=None):
         super().__init__(parent)
         self.start_hour = start_hour
         self.end_hour = end_hour
         self.shifts = shifts
-        self.setMinimumHeight(max(50, 15 + len(self.shifts) * 20))
+        self.setMinimumHeight(max(35, 12 + len(self.shifts) * 20))
         self.setMouseTracking(True)
         self.shift_rects = []
 
@@ -115,9 +338,9 @@ class OccupancyWidget(QWidget):
             return
             
         role_colors = {
-            "Owner": QColor("#D32F2F"),    # Red
-            "Manager": QColor("#1976D2"),  # Blue
-            "Worker": QColor("#388E3C")    # Green
+            "Owner": QColor("#27BBF5"),    # Light Blue
+            "Manager": QColor("#F59527"),  # Light Orange
+            "Worker": QColor("#4CCC35")    # Light Green
         }
         
         # Draw hour markers inside the bar
@@ -153,13 +376,17 @@ class OccupancyWidget(QWidget):
             y = margin_y + i * shift_height
             
             if shift.get('is_voluntary'):
-                color = QColor("#9C27B0") # Purple for Voluntary Shifts
+                color = QColor("#B3B39B") # greenish grey for Voluntary Shifts
             else:
                 color = role_colors.get(shift.get('role', ''), QColor("#757575"))
                 
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
-            rect_f = QRectF(x, y, w, shift_height)
+            
+            actual_shift_height = shift_height * (2 / 3)
+            y_adjusted = y + (shift_height - actual_shift_height) / 2
+            
+            rect_f = QRectF(x, y_adjusted, w, actual_shift_height)
             painter.drawRoundedRect(rect_f, 2, 2)
             self.shift_rects.append((rect_f, shift))
             
@@ -167,17 +394,28 @@ class OccupancyWidget(QWidget):
             font.setPointSize(8)
             font.setBold(True)
             painter.setFont(font)
-            text_rect = QRectF(x, y, w, shift_height)
+            text_rect = QRectF(x, y_adjusted, w, actual_shift_height)
             if w > 30:
-                painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, shift.get('name', ''))
+                shift_text = f"{shift.get('name', '')} ({shift.get('start_time', '')} - {shift.get('end_time', '')})"
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, shift_text)
 
     def mouseMoveEvent(self, event):
         pos = event.position()
         for rect, shift in self.shift_rects:
             if rect.contains(pos):
                 self.setToolTip(shift.get('tooltip', ''))
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
                 return
         self.setToolTip('')
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            for rect, shift in self.shift_rects:
+                if rect.contains(pos):
+                    self.shiftClicked.emit(shift)
+                    return
 
 class WorkerRegistry(QWidget):
     def __init__(self):
@@ -244,6 +482,7 @@ class WorkerRegistry(QWidget):
 class ShiftPlanner(QWidget):
     def __init__(self):
         super().__init__()
+        self._adjusting_heights = False
         self.current_date = datetime.now()
         layout = QHBoxLayout(self)
         
@@ -263,10 +502,13 @@ class ShiftPlanner(QWidget):
         
         # Time Picker Layout
         time_layout = QHBoxLayout()
-        self.start_time = QTimeEdit()
-        self.start_time.setTime(QTime(9, 0))
-        self.end_time = QTimeEdit()
-        self.end_time.setTime(QTime(17, 0))
+        self.start_time = QComboBox()
+        self.end_time = QComboBox()
+        time_intervals = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+        self.start_time.addItems(time_intervals)
+        self.end_time.addItems(time_intervals)
+        self.start_time.setCurrentText("09:00")
+        self.end_time.setCurrentText("17:00")
         time_layout.addWidget(QLabel("Start:"))
         time_layout.addWidget(self.start_time)
         time_layout.addWidget(QLabel("End:"))
@@ -285,6 +527,12 @@ class ShiftPlanner(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem("Unassigned"))
             self.table.setItem(i, 2, QTableWidgetItem(""))
         plan_layout.addWidget(self.table)
+        
+        original_resize = self.table.resizeEvent
+        def resize_event_override(event):
+            original_resize(event)
+            self.adjust_row_heights()
+        self.table.resizeEvent = resize_event_override
         
         assign_btn = QPushButton("Assign Selected Worker to Selected Day")
         assign_btn.clicked.connect(self.assign_shift)
@@ -315,7 +563,7 @@ class ShiftPlanner(QWidget):
         task_layout.addWidget(self.task_list)
         task_group.setLayout(task_layout)
         
-        layout.addLayout(plan_layout, 2)
+        layout.addLayout(plan_layout, 5)
         layout.addWidget(task_group, 1)
         
         self.load_worker_combo()
@@ -398,7 +646,7 @@ class ShiftPlanner(QWidget):
                     continue
                 row = days.index(day)
                 
-                start_hour = 8.0
+                start_hour = 10.0
                 end_hour = 22.0
                 for s in day_shift_list:
                     if s.get("start_time"):
@@ -410,46 +658,98 @@ class ShiftPlanner(QWidget):
                 for s in day_shift_list:
                     wh = worker_hours.get(s['worker_name'], {'weekly': 0.0, 'monthly': 0.0, 'vol_weekly': 0.0, 'vol_monthly': 0.0})
                     type_str = "Voluntary" if s.get("is_voluntary") else "Regular"
-                    tooltip = (f"Worker: {s['worker_name']}\nRole: {s['role']}\n"
+                    display_role = "SalesEx" if s.get('role', '') == "Worker" else s.get('role', '')
+                    tooltip = (f"Worker: {s['worker_name']}\nRole: {display_role}\n"
                                f"Shift: {s.get('start_time')} - {s.get('end_time')} ({type_str})\n"
                                f"Weekly Reg: {wh.get('weekly', 0):.1f}h | Vol: {wh.get('vol_weekly', 0):.1f}h\n"
                                f"Monthly Reg: {wh.get('monthly', 0):.1f}h | Vol: {wh.get('vol_monthly', 0):.1f}h")
                                
                     if s.get("start_time") and s.get("end_time"):
                         parsed_shifts.append({
+                            'id': s.get('id'),
                             'start': self.time_to_float(s["start_time"]),
                             'end': self.time_to_float(s["end_time"]),
                             'role': s.get('role', ''),
                             'name': s.get('worker_name', ''),
                             'tooltip': tooltip,
-                            'is_voluntary': s.get("is_voluntary", 0)
+                            'is_voluntary': s.get("is_voluntary", 0),
+                            'start_time': s.get('start_time'),
+                            'end_time': s.get('end_time'),
+                            'tasks': s.get('tasks', '')
                         })
                 
                 if parsed_shifts:
                     occupancy_widget = OccupancyWidget(start_hour, end_hour, parsed_shifts)
+                    occupancy_widget.shiftClicked.connect(self.edit_shift)
                     self.table.setItem(row, 1, QTableWidgetItem(""))
                     self.table.setCellWidget(row, 1, occupancy_widget)
 
                 tasks_container = QWidget()
                 tasks_layout = QVBoxLayout(tasks_container)
-                tasks_layout.setContentsMargins(5, 5, 5, 5)
+                tasks_layout.setContentsMargins(4, 4, 4, 4)
+                tasks_layout.setSpacing(6)
+                
                 for s in day_shift_list:
                     if s.get("tasks"):
-                        vol_mark = "(Vol) " if s.get("is_voluntary") else ""
-                        lbl = QLabel(f"<b>[{s['worker_name']}]</b> {vol_mark}{s['tasks']}")
-                        lbl.setWordWrap(True)
-                        tasks_layout.addWidget(lbl)
+                        display_role = "SalesEx" if s.get("role") == "Worker" else s.get("role", "")
+                        icon = "👑" if display_role == "Owner" else "👔" if display_role == "Manager" else "🛒"
+                        
+                        shift_row_widget = QWidget()
+                        shift_row_layout = QHBoxLayout(shift_row_widget)
+                        shift_row_layout.setContentsMargins(0, 0, 0, 0)
+                        shift_row_layout.setSpacing(6)
+                        
+                        worker_card = QFrame()
+                        worker_card.setObjectName("workerCard")
+                        worker_card.setStyleSheet("""
+                            QFrame#workerCard {
+                                background-color: #E3F2FD;
+                                border: 1px solid #90CAF9;
+                                border-radius: 6px;
+                            }
+                        """)
+                        w_layout = QVBoxLayout(worker_card)
+                        w_layout.setContentsMargins(8, 4, 8, 4)
+                        header_lbl = QLabel(f"{icon} <b>{s['worker_name']} <br>({display_role})</b>")
+                        header_lbl.setStyleSheet("border: none; background: transparent; color: #0D47A1; font-size: 12px;")
+                        w_layout.addWidget(header_lbl)
+                        
+                        shift_row_layout.addWidget(worker_card, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+                        
+                        tasks_flow_widget = QWidget()
+                        flow_layout = FlowLayout(tasks_flow_widget, margin=0, hSpacing=4, vSpacing=4, alignment=Qt.AlignmentFlag.AlignLeft)
+                        
+                        task_list = [t.strip() for t in s.get("tasks", "").split(",") if t.strip()]
+                        for task in task_list:
+                            card = QFrame()
+                            card.setMaximumWidth(450)
+                            card.setObjectName("taskCard")
+                            card.setStyleSheet("""
+                                QFrame#taskCard {
+                                    background-color: #FFFFFF;
+                                    border: 1px solid #E0E0E0;
+                                    border-radius: 6px;
+                                }
+                            """)
+                            card_layout = QVBoxLayout(card)
+                            card_layout.setContentsMargins(8, 4, 8, 4)
+                            
+                            vol_mark = "<b style='color:#B3B39B;'>(Vol)</b> " if s.get("is_voluntary") else ""
+                            tasks_lbl = QLabel(f"{vol_mark}{task}")
+                            tasks_lbl.setWordWrap(True)
+                            tasks_lbl.setStyleSheet("border: none; background: transparent; color: #546E7A; font-size: 11px;")
+                            card_layout.addWidget(tasks_lbl)
+                            
+                            flow_layout.addWidget(card)
+                            
+                        shift_row_layout.addWidget(tasks_flow_widget, 1, Qt.AlignmentFlag.AlignTop)
+                        tasks_layout.addWidget(shift_row_widget)
+                        
                 tasks_layout.addStretch()
                 self.table.setItem(row, 2, QTableWidgetItem(""))
                 self.table.setCellWidget(row, 2, tasks_container)
                 
-            self.table.resizeRowsToContents()
-            for i in range(7):
-                widget = self.table.cellWidget(i, 1)
-                if widget:
-                    self.table.setRowHeight(i, max(60, widget.minimumHeight() + 10))
-                else:
-                    self.table.setRowHeight(i, max(60, self.table.rowHeight(i)))
+            self.adjust_row_heights()
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to load shifts: {e}")
 
@@ -497,8 +797,8 @@ class ShiftPlanner(QWidget):
         day = day_text.split('\n')[0]
         full_date_str = day_text.split('\n')[1] if '\n' in day_text else ""
         
-        start_time_str = self.start_time.time().toString("HH:mm")
-        end_time_str = self.end_time.time().toString("HH:mm")
+        start_time_str = self.start_time.currentText()
+        end_time_str = self.end_time.currentText()
         
         selected_tasks = []
         for i in range(self.task_list.count()):
@@ -528,6 +828,45 @@ class ShiftPlanner(QWidget):
         except requests.exceptions.RequestException as e:
             logging.error(f"Error assigning shift: {e}")
             QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
+
+    def edit_shift(self, shift_data):
+        workers = []
+        try:
+            res = requests.get(f"{API_URL}/workers", timeout=3)
+            res.raise_for_status()
+            workers = res.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to load workers for editing shift: {e}")
+            QMessageBox.critical(self, "Error", f"Cannot load workers: {e}")
+            return
+            
+        dialog = EditShiftDialog(shift_data, workers, self)
+        if dialog.exec():
+            data_out = dialog.get_data()
+            shift_id = data_out['id']
+            if data_out['action'] == 'delete':
+                try:
+                    res = requests.delete(f"{API_URL}/shifts/{shift_id}", timeout=3)
+                    res.raise_for_status()
+                    self.load_shifts()
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Error deleting shift: {e}")
+                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
+            elif data_out['action'] == 'update':
+                data = {
+                    "worker_name": data_out['worker_name'],
+                    "role": data_out['role'],
+                    "start_time": data_out['start_time'],
+                    "end_time": data_out['end_time'],
+                    "tasks": data_out['tasks']
+                }
+                try:
+                    res = requests.put(f"{API_URL}/shifts/{shift_id}", json=data, timeout=3)
+                    res.raise_for_status()
+                    self.load_shifts()
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Error updating shift: {e}")
+                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
     def add_voluntary_shift(self):
         worker_data = self.worker_combo.currentData()
@@ -590,21 +929,65 @@ class ShiftPlanner(QWidget):
             os.makedirs(export_dir)
         return export_dir
 
+    def _get_full_table_pixmap(self):
+        original_min = self.table.minimumSize()
+        original_max = self.table.maximumSize()
+        original_size = self.table.size()
+        original_h_policy = self.table.horizontalScrollBarPolicy()
+        original_v_policy = self.table.verticalScrollBarPolicy()
+
+        # Temporarily turn off scrollbars to prevent them from appearing in exports
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        total_width = int(self.table.verticalHeader().width() + self.table.horizontalHeader().length() + self.table.frameWidth() * 2)
+        total_height = int(self.table.horizontalHeader().height() + self.table.verticalHeader().length() + self.table.frameWidth() * 2)
+        
+        # Temporarily stretch out the table bounds to capture its whole contents
+        self.table.setFixedSize(total_width, total_height)
+        QApplication.processEvents() 
+        
+        pixmap = self.table.grab()
+        
+        # Reset back to original metrics
+        self.table.setMinimumSize(original_min)
+        self.table.setMaximumSize(original_max)
+        self.table.resize(original_size)
+        self.table.setHorizontalScrollBarPolicy(original_h_policy)
+        self.table.setVerticalScrollBarPolicy(original_v_policy)
+        
+        return pixmap
+
     def export_png(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PNG", self._get_export_dir(), "PNG Image (*.png)")
+        week_num = self.current_date.isocalendar()[1]
+        monday = self.current_date - timedelta(days=self.current_date.weekday())
+        sunday = monday + timedelta(days=6)
+        date_range = f"{monday.strftime('%Y-%m-%d')}_to_{sunday.strftime('%Y-%m-%d')}"
+        default_filename = f"shift_plan_CW{week_num}_{date_range}.png"
+        default_path = os.path.join(self._get_export_dir(), default_filename)
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PNG", default_path, "PNG Image (*.png)")
         if file_path:
-            pixmap = self.table.grab()
+            pixmap = self._get_full_table_pixmap()
             pixmap.save(file_path, "PNG")
             QMessageBox.information(self, "Success", f"Shift plan exported as PNG to:\n{file_path}")
 
     def export_pdf(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PDF", self._get_export_dir(), "PDF Document (*.pdf)")
+        week_num = self.current_date.isocalendar()[1]
+        monday = self.current_date - timedelta(days=self.current_date.weekday())
+        sunday = monday + timedelta(days=6)
+        date_range = f"{monday.strftime('%Y-%m-%d')}_to_{sunday.strftime('%Y-%m-%d')}"
+        default_filename = f"shift_plan_CW{week_num}_{date_range}.pdf"
+        default_path = os.path.join(self._get_export_dir(), default_filename)
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Shift Plan as PDF", default_path, "PDF Document (*.pdf)")
         if file_path:
-            pixmap = self.table.grab()
+            pixmap = self._get_full_table_pixmap()
             writer = QPdfWriter(file_path)
             
             page_layout = QPageLayout(QPageSize(QPageSize.PageSizeId.A4), 
                                       QPageLayout.Orientation.Landscape, 
+                                      QMarginsF(15, 15, 15, 15),
                                       QPageLayout.Unit.Millimeter)
             writer.setPageLayout(page_layout)
             
@@ -617,6 +1000,50 @@ class ShiftPlanner(QWidget):
             painter.drawPixmap(0, 0, pixmap)
             painter.end()
             QMessageBox.information(self, "Success", f"Shift plan exported as PDF to:\n{file_path}")
+
+    def adjust_row_heights(self):
+        if getattr(self, '_adjusting_heights', False):
+            return
+        self._adjusting_heights = True
+        try:
+            for i in range(7):
+                widget1 = self.table.cellWidget(i, 1)
+                widget2 = self.table.cellWidget(i, 2)
+                
+                h1 = widget1.minimumHeight() + 8 if widget1 else 30
+                h2 = 10
+                
+                if widget2 and widget2.layout():
+                    col_width = self.table.columnWidth(2)
+                    if col_width < 50:
+                        col_width = 300
+                        
+                    v_layout = widget2.layout()
+                    margins = v_layout.contentsMargins()
+                    h2 = margins.top() + margins.bottom()
+                    
+                    actual_items = 0
+                    for c in range(v_layout.count()):
+                        item = v_layout.itemAt(c)
+                        if item and item.widget() and item.widget().layout():
+                            child_layout = item.widget().layout()
+                            if isinstance(child_layout, QHBoxLayout) and child_layout.count() >= 2:
+                                w_card = child_layout.itemAt(0).widget()
+                                t_flow = child_layout.itemAt(1).widget()
+                                
+                                if w_card and t_flow and t_flow.layout() and isinstance(t_flow.layout(), FlowLayout):
+                                    flow_width = col_width - w_card.sizeHint().width() - child_layout.spacing() - margins.left() - margins.right() - 5
+                                    flow_h = t_flow.layout().heightForWidth(max(10, flow_width))
+                                    
+                                    if actual_items > 0:
+                                        h2 += v_layout.spacing()
+                                    h2 += max(w_card.sizeHint().height(), flow_h)
+                                    actual_items += 1
+                    if actual_items == 0:
+                        h2 = 30
+                self.table.setRowHeight(i, int(max(30, h1, h2)))
+        finally:
+            self._adjusting_heights = False
 
 class EmployeeTimesheet(QWidget):
     def __init__(self):
@@ -994,7 +1421,7 @@ class MainWindow(QMainWindow):
         self.update_week_label()
         
         content_layout.addLayout(sidebar_layout, 1)
-        content_layout.addWidget(self.stacked_widget, 4)
+        content_layout.addWidget(self.stacked_widget, 8)
         main_layout.addLayout(content_layout)
         
         # Apply application wide Sunrise stylesheet

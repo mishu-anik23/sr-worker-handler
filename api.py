@@ -6,8 +6,8 @@ app = Flask(__name__)
 # Task map defining the necessary work list relevant to each role
 role_tasks = {
     "Owner": ["Cashier Duties", "Cash Closing", "Review Finances", "Strategic Planning", "Supplier Meetings", "Final Approvals",
-              "Product Entry in Cash System", "Product Entry in Website", "Price Tag Generation", "Old Price Update",
-              "Product Inventory & Order", "Customer Bill Generation", "Vegetable Pickup Kelsterbach",
+              "Product Entry in Cash System", "Product Entry in Website", "Price Tag Generation", "Website/Social Media Content Creation", "Old Price Update",
+              "Product Inventory & Order", "Customer Bill Generation", "Backend Software Development", "Vegetable Pickup Kelsterbach",
               "Veg-Fruit Purchase from Frischezentrum", "Italian Vegetable Pickup from Frischezentrum",
               "Freezelog Products Pickup", "BD Fruit-Veg Pickup From Frankfurt Airpot",
               "Business Relations / Price Query With INTL Exporters", "Frankfurt Zollamt / CNF Handling",
@@ -16,7 +16,8 @@ role_tasks = {
     "Manager": ["Inventory Check", "Staff Scheduling", "Store Inspection", "Customer Relations"],
     "Worker": [
         "Stock Shelves/Floor Acitiviteis", "Cashier Duties", "Aisle Cleaning", "Vegetable Room Cleaning",
-        "Vegtable Checking/Packing", "Fish/Meat Cut Machine Clean", "Assist Customers", "Keller Water Empty",
+        "Vegtable Checking/Packing", "Fish/Meat Cut Machine Clean", "Closing Cleaning/Packing", "Assist Customers",
+        "Keller Water Empty",
         "Paper Tonne Taking Outside", "Vegetable Room Water Empty", "Product Inventory & Order List",
         "Product Expiry Date Checking", "Freezelog Products Pickup"]
 }
@@ -118,11 +119,25 @@ def manage_shifts():
     conn.close()
     return jsonify([dict(s) for s in shifts])
 
-@app.route('/api/shifts/<int:shift_id>', methods=['PUT'])
+@app.route('/api/shifts/<int:shift_id>', methods=['PUT', 'DELETE'])
 def update_shift(shift_id):
     conn = get_db_connection()
+    if request.method == 'DELETE':
+        conn.execute('DELETE FROM shifts WHERE id = ?', (shift_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success"})
+        
     data = request.json
-    conn.execute('UPDATE shifts SET timesheet_data = ? WHERE id = ?', (data.get('timesheet_data'), shift_id))
+    # Only update timesheet_data if it's the only field provided (from EmployeeTimesheet)
+    if 'timesheet_data' in data and len(data) == 1:
+        conn.execute('UPDATE shifts SET timesheet_data = ? WHERE id = ?', (data.get('timesheet_data'), shift_id))
+    else:
+        conn.execute('''
+            UPDATE shifts 
+            SET worker_name = ?, role = ?, start_time = ?, end_time = ?, tasks = ?
+            WHERE id = ?
+        ''', (data.get('worker_name'), data.get('role'), data.get('start_time'), data.get('end_time'), data.get('tasks'), shift_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
