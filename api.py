@@ -1,5 +1,6 @@
 import sqlite3
 from flask import Flask, jsonify, request
+from contextlib import closing
 
 app = Flask(__name__)
 
@@ -45,6 +46,7 @@ def init_db():
             worker_name TEXT NOT NULL,
             role TEXT NOT NULL,
             start_time TEXT,
+            entry_time TEXT,
             end_time TEXT,
             tasks TEXT,
             timesheet_data TEXT,
@@ -54,7 +56,7 @@ def init_db():
     ''')
     
     # Safely alter table to add new columns if the database file already exists
-    for col in ['start_time TEXT', 'end_time TEXT', 'tasks TEXT', 'timesheet_data TEXT', 'full_date TEXT', 'is_voluntary BOOLEAN DEFAULT 0']:
+    for col in ['start_time TEXT', 'end_time TEXT', 'entry_time TEXT', 'tasks TEXT', 'timesheet_data TEXT', 'full_date TEXT', 'is_voluntary BOOLEAN DEFAULT 0']:
         try:
             conn.execute(f'ALTER TABLE shifts ADD COLUMN {col}')
         except sqlite3.OperationalError:
@@ -64,26 +66,24 @@ def init_db():
 
 @app.route('/api/workers', methods=['GET', 'POST'])
 def manage_workers():
-    conn = get_db_connection()
-    if request.method == 'POST':
-        data = request.json
-        cursor = conn.execute(
-            'INSERT INTO workers (name, role, bio) VALUES (?, ?, ?)',
-            (data.get("name"), data.get("role"), data.get("bio"))
-        )
-        conn.commit()
-        worker = {
-            "id": cursor.lastrowid,
-            "name": data.get("name"),
-            "role": data.get("role"),
-            "bio": data.get("bio")
-        }
-        conn.close()
-        return jsonify({"status": "success", "worker": worker}), 201
-        
-    workers = conn.execute('SELECT * FROM workers').fetchall()
-    conn.close()
-    return jsonify([dict(w) for w in workers])
+    with closing(get_db_connection()) as conn:
+        if request.method == 'POST':
+            data = request.json
+            cursor = conn.execute(
+                'INSERT INTO workers (name, role, bio) VALUES (?, ?, ?)',
+                (data.get("name"), data.get("role"), data.get("bio"))
+            )
+            conn.commit()
+            worker = {
+                "id": cursor.lastrowid,
+                "name": data.get("name"),
+                "role": data.get("role"),
+                "bio": data.get("bio")
+            }
+            return jsonify({"status": "success", "worker": worker}), 201
+            
+        workers = conn.execute('SELECT * FROM workers').fetchall()
+        return jsonify([dict(w) for w in workers])
 
 @app.route('/api/tasks/<role>', methods=['GET'])
 def get_tasks(role):
@@ -92,12 +92,13 @@ def get_tasks(role):
 
 @app.route('/api/shifts', methods=['GET', 'POST'])
 def manage_shifts():
+    # TODO: Use contextlib.closing for database connection resource management.
     conn = get_db_connection()
     if request.method == 'POST':
         data = request.json
         cursor = conn.execute(
-            'INSERT INTO shifts (date, full_date, worker_name, role, start_time, end_time, tasks, timesheet_data, is_voluntary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (data.get("date"), data.get("full_date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("end_time"), data.get("tasks"), data.get("timesheet_data"), data.get("is_voluntary", 0))
+            'INSERT INTO shifts (date, full_date, worker_name, role, start_time, entry_time, end_time, tasks, timesheet_data, is_voluntary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (data.get("date"), data.get("full_date"), data.get("worker_name"), data.get("role"), data.get("start_time"), data.get("entry_time"), data.get("end_time"), data.get("tasks"), data.get("timesheet_data"), data.get("is_voluntary", 0))
         )
         conn.commit()
         shift = {
@@ -106,6 +107,7 @@ def manage_shifts():
             "worker_name": data.get("worker_name"),
             "role": data.get("role"),
             "start_time": data.get("start_time"),
+            "entry_time": data.get("entry_time"),
             "end_time": data.get("end_time"),
             "tasks": data.get("tasks"),
             "full_date": data.get("full_date"),
@@ -121,6 +123,7 @@ def manage_shifts():
 
 @app.route('/api/shifts/<int:shift_id>', methods=['PUT', 'DELETE'])
 def update_shift(shift_id):
+    # TODO: Use contextlib.closing for database connection resource management.
     conn = get_db_connection()
     if request.method == 'DELETE':
         conn.execute('DELETE FROM shifts WHERE id = ?', (shift_id,))
@@ -129,22 +132,25 @@ def update_shift(shift_id):
         return jsonify({"status": "success"})
         
     data = request.json
-    # Only update timesheet_data if it's the only field provided (from EmployeeTimesheet)
-    if 'timesheet_data' in data and len(data) == 1:
-        conn.execute('UPDATE shifts SET timesheet_data = ? WHERE id = ?', (data.get('timesheet_data'), shift_id))
-    else:
-        conn.execute('''
-            UPDATE shifts 
-            SET worker_name = ?, role = ?, start_time = ?, end_time = ?, tasks = ?
-            WHERE id = ?
-        ''', (data.get('worker_name'), data.get('role'), data.get('start_time'), data.get('end_time'), data.get('tasks'), shift_id))
-    conn.commit()
+    fields = []
+    values = []
+    for key in ['worker_name', 'role', 'start_time', 'entry_time', 'end_time', 'tasks', 'timesheet_data']:
+        if key in data:
+            fields.append(f"{key} = ?")
+            values.append(data[key])
+            
+    if fields:
+        values.append(shift_id)
+        query = f"UPDATE shifts SET {', '.join(fields)} WHERE id = ?"
+        conn.execute(query, tuple(values))
+        conn.commit()
     conn.close()
     return jsonify({"status": "success"})
 
 @app.route('/api/shifts/<day>', methods=['DELETE'])
 def clear_shifts(day):
     full_date = request.args.get('full_date')
+    # TODO: Use contextlib.closing for database connection resource management.
     conn = get_db_connection()
     if full_date:
         conn.execute('DELETE FROM shifts WHERE date = ? AND full_date = ?', (day, full_date))

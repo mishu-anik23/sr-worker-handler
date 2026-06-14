@@ -149,6 +149,37 @@ class CalendarDialog(QDialog):
     def get_date(self):
         return self.calendar.selectedDate().toPyDate()
 
+class SetLateEntryDialog(QDialog):
+    def __init__(self, shift_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Set Late Entry")
+        self.setMinimumWidth(300)
+        layout = QVBoxLayout(self)
+        
+        form = QFormLayout()
+        form.addRow("Worker:", QLabel(shift_data.get('name', '')))
+        form.addRow("Scheduled Start:", QLabel(shift_data.get('start_time', '')))
+        
+        self.entry_time = QComboBox()
+        time_intervals = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+        self.entry_time.addItems(time_intervals)
+        self.entry_time.setCurrentText(shift_data.get('entry_time') or shift_data.get('start_time', '00:00'))
+        
+        form.addRow("Late Entry / Arrival:", self.entry_time)
+        layout.addLayout(form)
+        
+        btn_box = QHBoxLayout()
+        save_btn = QPushButton("Save Entry Time")
+        save_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btn_box.addWidget(save_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+        
+    def get_data(self):
+        return {"entry_time": self.entry_time.currentText()}
 
 class VoluntaryShiftDialog(QDialog):
     def __init__(self, worker_name, tasks, parent=None):
@@ -268,6 +299,7 @@ class EditShiftDialog(QDialog):
         if worker_data:
             role = worker_data.get('role')
             try:
+                # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
                 res = requests.get(f"{API_URL}/tasks/{role}", timeout=3)
                 res.raise_for_status()
                 for task in res.json():
@@ -307,12 +339,12 @@ class EditShiftDialog(QDialog):
 
 class OccupancyWidget(QWidget):
     shiftClicked = pyqtSignal(dict)
-
-    def __init__(self, start_hour, end_hour, shifts, parent=None):
+    def __init__(self, start_hour, end_hour, shifts, show_actuals=False, parent=None):
         super().__init__(parent)
         self.start_hour = start_hour
         self.end_hour = end_hour
         self.shifts = shifts
+        self.show_actuals = show_actuals
         self.setMinimumHeight(max(35, 12 + len(self.shifts) * 20))
         self.setMouseTracking(True)
         self.shift_rects = []
@@ -363,10 +395,12 @@ class OccupancyWidget(QWidget):
         for i, shift in enumerate(self.shifts):
             s = shift['start']
             e = shift['end']
+            entry = shift.get('entry', s)
             
             # Ensure shifts stay within operational hours
             s_clamped = max(self.start_hour, min(s, self.end_hour))
             e_clamped = max(self.start_hour, min(e, self.end_hour))
+            entry_clamped = max(self.start_hour, min(entry, self.end_hour))
             
             if e_clamped <= s_clamped: 
                 continue
@@ -380,24 +414,44 @@ class OccupancyWidget(QWidget):
             else:
                 color = role_colors.get(shift.get('role', ''), QColor("#757575"))
                 
-            painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
             
             actual_shift_height = shift_height * (2 / 3)
             y_adjusted = y + (shift_height - actual_shift_height) / 2
-            
             rect_f = QRectF(x, y_adjusted, w, actual_shift_height)
+            
+            painter.setBrush(color)
             painter.drawRoundedRect(rect_f, 2, 2)
+            
+            # Draw red overlay for late entry portion
+            if self.show_actuals and entry_clamped > s_clamped:
+                late_w = ((entry_clamped - s_clamped) / total_hours) * width
+                late_rect_f = QRectF(x, y_adjusted, late_w, actual_shift_height)
+                painter.setBrush(QColor("#EF5350")) # Red for late absent
+                painter.drawRoundedRect(late_rect_f, 2, 2)
+                
             self.shift_rects.append((rect_f, shift))
             
-            painter.setPen(QColor("#FFFFFF"))
             font.setPointSize(8)
             font.setBold(True)
             painter.setFont(font)
             text_rect = QRectF(x, y_adjusted, w, actual_shift_height)
             if w > 30:
                 shift_text = f"{shift.get('name', '')} ({shift.get('start_time', '')} - {shift.get('end_time', '')})"
+                fm = painter.fontMetrics()
+                text_width = fm.horizontalAdvance(shift_text)
+                
+                painter.setPen(QColor("#FFFFFF"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, shift_text)
+                
+                if self.show_actuals and entry > s:
+                    late_text = f" [Entry: {shift.get('entry_time')}]"
+                    late_width = fm.horizontalAdvance(late_text)
+                    center_x = x + w/2
+                    start_x = center_x + text_width/2
+                    late_text_rect = QRectF(start_x, y_adjusted, late_width, actual_shift_height)
+                    painter.setPen(QColor("#FF0000")) # Draw late entry explicitly red
+                    painter.drawText(late_text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, late_text)
 
     def mouseMoveEvent(self, event):
         pos = event.position()
@@ -456,6 +510,7 @@ class WorkerRegistry(QWidget):
             "bio": self.bio_input.toPlainText()
         }
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.post(f"{API_URL}/workers", json=data, timeout=3)
             res.raise_for_status()
             self.name_input.clear()
@@ -467,6 +522,7 @@ class WorkerRegistry(QWidget):
 
     def load_workers(self):
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/workers", timeout=3)
             res.raise_for_status()
             workers = res.json()
@@ -479,15 +535,17 @@ class WorkerRegistry(QWidget):
             logging.error(f"Failed to load workers: {e}")
 
 
-class ShiftPlanner(QWidget):
-    def __init__(self):
+class BaseShiftManager(QWidget):
+    def __init__(self, show_actuals=False):
         super().__init__()
         self._adjusting_heights = False
         self.current_date = datetime.now()
+        self.show_actuals = show_actuals
         layout = QHBoxLayout(self)
         
         # Left Panel - Planning
         plan_layout = QVBoxLayout()
+        self.plan_layout = plan_layout
         
         # Worker selection
         self.worker_combo = QComboBox()
@@ -517,7 +575,8 @@ class ShiftPlanner(QWidget):
         
         # Planner Table
         self.table = QTableWidget(7, 3)
-        self.table.setHorizontalHeaderLabels(["Day", "Shift Timeline", "Tasks"])
+        timeline_lbl = "Shift Timeline (Actuals)" if self.show_actuals else "Shift Timeline"
+        self.table.setHorizontalHeaderLabels(["Day", timeline_lbl, "Tasks"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -565,9 +624,6 @@ class ShiftPlanner(QWidget):
         
         layout.addLayout(plan_layout, 5)
         layout.addWidget(task_group, 1)
-        
-        self.load_worker_combo()
-        self.load_shifts()
 
     def update_dates(self, base_date):
         if isinstance(base_date, datetime):
@@ -599,6 +655,7 @@ class ShiftPlanner(QWidget):
             self.table.setItem(i, 2, QTableWidgetItem(""))
 
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/shifts", timeout=3)
             res.raise_for_status()
             shifts = res.json()
@@ -617,7 +674,9 @@ class ShiftPlanner(QWidget):
                         w_name = s["worker_name"]
                         if w_name not in worker_hours:
                             worker_hours[w_name] = {'weekly': 0.0, 'monthly': 0.0, 'vol_weekly': 0.0, 'vol_monthly': 0.0}
-                        hrs = self.time_to_float(s["end_time"]) - self.time_to_float(s["start_time"])
+                        entry_val = s.get("entry_time") or s["start_time"]
+                        actual_start = max(self.time_to_float(s["start_time"]), self.time_to_float(entry_val))
+                        hrs = max(0.0, self.time_to_float(s["end_time"]) - actual_start)
                         is_vol = s.get("is_voluntary", 0)
                         
                         if is_vol:
@@ -668,19 +727,21 @@ class ShiftPlanner(QWidget):
                         parsed_shifts.append({
                             'id': s.get('id'),
                             'start': self.time_to_float(s["start_time"]),
+                            'entry': self.time_to_float(s.get("entry_time") or s["start_time"]),
                             'end': self.time_to_float(s["end_time"]),
                             'role': s.get('role', ''),
                             'name': s.get('worker_name', ''),
                             'tooltip': tooltip,
                             'is_voluntary': s.get("is_voluntary", 0),
                             'start_time': s.get('start_time'),
+                            'entry_time': s.get('entry_time') or s.get('start_time'),
                             'end_time': s.get('end_time'),
                             'tasks': s.get('tasks', '')
                         })
                 
                 if parsed_shifts:
-                    occupancy_widget = OccupancyWidget(start_hour, end_hour, parsed_shifts)
-                    occupancy_widget.shiftClicked.connect(self.edit_shift)
+                    occupancy_widget = OccupancyWidget(start_hour, end_hour, parsed_shifts, show_actuals=self.show_actuals)
+                    occupancy_widget.shiftClicked.connect(self.handle_shift_click)
                     self.table.setItem(row, 1, QTableWidgetItem(""))
                     self.table.setCellWidget(row, 1, occupancy_widget)
 
@@ -753,9 +814,13 @@ class ShiftPlanner(QWidget):
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to load shifts: {e}")
 
+    def handle_shift_click(self, shift_data):
+        pass
+
     def load_worker_combo(self):
         self.worker_combo.clear()
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/workers", timeout=3)
             res.raise_for_status()
             for w in res.json():
@@ -771,6 +836,7 @@ class ShiftPlanner(QWidget):
         if worker_data:
             role = worker_data.get('role')
             try:
+                # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
                 res = requests.get(f"{API_URL}/tasks/{role}", timeout=3)
                 res.raise_for_status()
                 for task in res.json():
@@ -818,55 +884,18 @@ class ShiftPlanner(QWidget):
             "worker_name": worker_data['name'],
             "role": worker_data['role'],
             "start_time": start_time_str,
+            "entry_time": start_time_str,
             "end_time": end_time_str,
             "tasks": tasks_str
         }
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.post(f"{API_URL}/shifts", json=data, timeout=3)
             res.raise_for_status()
             self.load_shifts()
         except requests.exceptions.RequestException as e:
             logging.error(f"Error assigning shift: {e}")
             QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
-
-    def edit_shift(self, shift_data):
-        workers = []
-        try:
-            res = requests.get(f"{API_URL}/workers", timeout=3)
-            res.raise_for_status()
-            workers = res.json()
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to load workers for editing shift: {e}")
-            QMessageBox.critical(self, "Error", f"Cannot load workers: {e}")
-            return
-            
-        dialog = EditShiftDialog(shift_data, workers, self)
-        if dialog.exec():
-            data_out = dialog.get_data()
-            shift_id = data_out['id']
-            if data_out['action'] == 'delete':
-                try:
-                    res = requests.delete(f"{API_URL}/shifts/{shift_id}", timeout=3)
-                    res.raise_for_status()
-                    self.load_shifts()
-                except requests.exceptions.RequestException as e:
-                    logging.error(f"Error deleting shift: {e}")
-                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
-            elif data_out['action'] == 'update':
-                data = {
-                    "worker_name": data_out['worker_name'],
-                    "role": data_out['role'],
-                    "start_time": data_out['start_time'],
-                    "end_time": data_out['end_time'],
-                    "tasks": data_out['tasks']
-                }
-                try:
-                    res = requests.put(f"{API_URL}/shifts/{shift_id}", json=data, timeout=3)
-                    res.raise_for_status()
-                    self.load_shifts()
-                except requests.exceptions.RequestException as e:
-                    logging.error(f"Error updating shift: {e}")
-                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
 
     def add_voluntary_shift(self):
         worker_data = self.worker_combo.currentData()
@@ -892,12 +921,14 @@ class ShiftPlanner(QWidget):
                 "worker_name": worker_data['name'],
                 "role": worker_data['role'],
                 "start_time": start_dt.strftime("%H:%M"),
+                "entry_time": start_dt.strftime("%H:%M"),
                 "end_time": end_dt.strftime("%H:%M"),
                 "tasks": data_out['tasks'],
                 "is_voluntary": 1
             }
             
             try:
+                # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
                 res = requests.post(f"{API_URL}/shifts", json=data, timeout=3)
                 res.raise_for_status()
                 self.load_shifts()
@@ -916,6 +947,7 @@ class ShiftPlanner(QWidget):
         full_date_str = day_text.split('\n')[1] if '\n' in day_text else ""
         
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.delete(f"{API_URL}/shifts/{day}?full_date={full_date_str}", timeout=3)
             res.raise_for_status()
             self.load_shifts()
@@ -1045,6 +1077,89 @@ class ShiftPlanner(QWidget):
         finally:
             self._adjusting_heights = False
 
+class ShiftPlanner(BaseShiftManager):
+    def __init__(self):
+        super().__init__(show_actuals=False)
+        self.load_worker_combo()
+        self.load_shifts()
+
+    def handle_shift_click(self, shift_data):
+        self.edit_shift(shift_data)
+
+    def edit_shift(self, shift_data):
+        workers = []
+        try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
+            res = requests.get(f"{API_URL}/workers", timeout=3)
+            res.raise_for_status()
+            workers = res.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to load workers for editing shift: {e}")
+            QMessageBox.critical(self, "Error", f"Cannot load workers: {e}")
+            return
+            
+        dialog = EditShiftDialog(shift_data, workers, self)
+        if dialog.exec():
+            data_out = dialog.get_data()
+            shift_id = data_out['id']
+            if data_out['action'] == 'delete':
+                try:
+                    # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
+                    res = requests.delete(f"{API_URL}/shifts/{shift_id}", timeout=3)
+                    res.raise_for_status()
+                    self.load_shifts()
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Error deleting shift: {e}")
+                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
+            elif data_out['action'] == 'update':
+                data = {
+                    "worker_name": data_out['worker_name'],
+                    "role": data_out['role'],
+                    "start_time": data_out['start_time'],
+                    "end_time": data_out['end_time'],
+                    "tasks": data_out['tasks']
+                }
+                try:
+                    # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
+                    res = requests.put(f"{API_URL}/shifts/{shift_id}", json=data, timeout=3)
+                    res.raise_for_status()
+                    self.load_shifts()
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Error updating shift: {e}")
+                    QMessageBox.critical(self, "Error", f"Cannot connect to Flask Backend.\n\nDetails: {e}")
+
+class WeeklyOperationalOverview(BaseShiftManager):
+    def __init__(self):
+        super().__init__(show_actuals=True)
+        
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("<b>Click on any shift bar below to register a late entry / actual arrival.</b>"))
+        header_layout.addStretch()
+        refresh_btn = QPushButton("Refresh Overview")
+        refresh_btn.clicked.connect(self.load_shifts)
+        header_layout.addWidget(refresh_btn)
+        
+        self.plan_layout.insertLayout(0, header_layout)
+        
+        self.load_worker_combo()
+        self.load_shifts()
+
+    def handle_shift_click(self, shift_data):
+        self.set_late_entry(shift_data)
+
+    def set_late_entry(self, shift_data):
+        dialog = SetLateEntryDialog(shift_data, self)
+        if dialog.exec():
+            new_data = dialog.get_data()
+            try:
+                # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
+                res = requests.put(f"{API_URL}/shifts/{shift_data['id']}", json=new_data, timeout=3)
+                res.raise_for_status()
+                self.load_shifts()
+            except Exception as e:
+                logging.error(f"Error saving late entry: {e}")
+                QMessageBox.critical(self, "Error", f"Could not save: {e}")
+
 class EmployeeTimesheet(QWidget):
     def __init__(self):
         super().__init__()
@@ -1120,6 +1235,7 @@ class EmployeeTimesheet(QWidget):
     def load_data(self):
         self.worker_combo.clear()
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/workers", timeout=3)
             res.raise_for_status()
             for w in res.json():
@@ -1132,12 +1248,15 @@ class EmployeeTimesheet(QWidget):
         worker_name = self.worker_combo.currentData()
         if not worker_name: return
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/shifts", timeout=3)
             res.raise_for_status()
             for s in res.json():
                 if s.get('worker_name') == worker_name:
                     type_prefix = "[Vol] " if s.get('is_voluntary') else ""
-                    disp = f"{type_prefix}{s.get('full_date', s.get('date'))} ({s.get('start_time')} - {s.get('end_time')})"
+                    entry_str = s.get('entry_time') or s.get('start_time')
+                    late_info = f" [Entry: {entry_str}]" if entry_str != s.get('start_time') else ""
+                    disp = f"{type_prefix}{s.get('full_date', s.get('date'))} ({s.get('start_time')} - {s.get('end_time')}){late_info}"
                     self.shift_combo.addItem(disp, s)
         except requests.exceptions.RequestException as e:
             logging.error(f"Failed to load shifts for timesheet: {e}")
@@ -1165,7 +1284,11 @@ class EmployeeTimesheet(QWidget):
         try:
             h1, m1 = map(int, shift_data.get('start_time', '00:00').split(':'))
             h2, m2 = map(int, shift_data.get('end_time', '00:00').split(':'))
-            self.total_assigned_hours = (h2 + m2/60.0) - (h1 + m1/60.0)
+            entry_time_str = shift_data.get('entry_time') or shift_data.get('start_time', '00:00')
+            e1, em1 = map(int, entry_time_str.split(':'))
+            
+            actual_start = max(h1 + m1/60.0, e1 + em1/60.0)
+            self.total_assigned_hours = (h2 + m2/60.0) - actual_start
             if self.total_assigned_hours < 0: self.total_assigned_hours = 0.0
         except Exception:
             self.total_assigned_hours = 8.0 # Fallback
@@ -1181,6 +1304,16 @@ class EmployeeTimesheet(QWidget):
             except:
                 pass
         
+        # Late Entry Controller
+        late_entry_layout = QHBoxLayout()
+        entry_time_str = shift_data.get('entry_time') or shift_data.get('start_time', '00:00')
+        self.ts_entry_label = QLabel(entry_time_str)
+        
+        late_entry_layout.addWidget(QLabel("<b>Late Entry / Actual Arrival:</b>"))
+        late_entry_layout.addWidget(self.ts_entry_label)
+        late_entry_layout.addStretch()
+        self.tasks_layout.addLayout(late_entry_layout)
+
         # Header for columns
         header_row = QHBoxLayout()
         header_row.addWidget(QLabel("<b>Task</b>"), 3)
@@ -1273,10 +1406,16 @@ class EmployeeTimesheet(QWidget):
             'purpose': self.extra_purpose.text(),
             'status': self.extra_status_lbl.text().replace("Status: ", "")
         }
-            
+        
+        # TODO: Ensure timesheet_data always passes cleanly through json.dumps() to prevent malformed string errors.
+        payload = {
+            'timesheet_data': json.dumps(ts_data)
+        }
+        
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.put(f"{API_URL}/shifts/{self.current_shift_id}", 
-                               json={'timesheet_data': json.dumps(ts_data)}, timeout=3)
+                               json=payload, timeout=3)
             res.raise_for_status()
             
             shift_data = self.shift_combo.currentData()
@@ -1296,14 +1435,15 @@ class StatisticsWidget(QWidget):
         refresh_btn.clicked.connect(self.load_stats)
         layout.addWidget(refresh_btn)
         
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Worker", "Regular Hours", "Voluntary Hours", "Completed Tasks", "Pending/Working Tasks"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Worker", "Regular Hours", "Voluntary Hours", "Absent/Late Hours", "Completed Tasks", "Pending/Working Tasks"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
         self.load_stats()
         
     def load_stats(self):
         try:
+            # TODO: Offload this HTTP request to a QThread to prevent blocking the main GUI thread.
             res = requests.get(f"{API_URL}/shifts", timeout=3)
             res.raise_for_status()
             shifts = res.json()
@@ -1313,16 +1453,24 @@ class StatisticsWidget(QWidget):
                 w = s.get('worker_name')
                 if not w: continue
                 if w not in stats:
-                    stats[w] = {'reg_hours': 0.0, 'vol_hours': 0.0, 'completed': 0, 'pending': 0}
+                    stats[w] = {'reg_hours': 0.0, 'vol_hours': 0.0, 'absent_hours': 0.0, 'completed': 0, 'pending': 0}
                     
                 try:
                     h1, m1 = map(int, s['start_time'].split(':'))
                     h2, m2 = map(int, s['end_time'].split(':'))
-                    hrs = (h2 + m2/60.0) - (h1 + m1/60.0)
+                    e1, em1 = map(int, (s.get('entry_time') or s['start_time']).split(':'))
+                    
+                    start_flt = h1 + m1/60.0
+                    end_flt = h2 + m2/60.0
+                    actual_start = max(start_flt, e1 + em1/60.0)
+                    hrs = max(0.0, end_flt - actual_start)
+                    absent = max(0.0, actual_start - start_flt)
+                    
                     if s.get('is_voluntary'):
                         stats[w]['vol_hours'] += hrs
                     else:
                         stats[w]['reg_hours'] += hrs
+                    stats[w]['absent_hours'] += absent
                 except:
                     pass
                     
@@ -1350,8 +1498,9 @@ class StatisticsWidget(QWidget):
                 self.table.setItem(row, 0, QTableWidgetItem(worker))
                 self.table.setItem(row, 1, QTableWidgetItem(f"{data['reg_hours']:.1f} hr(s)"))
                 self.table.setItem(row, 2, QTableWidgetItem(f"{data['vol_hours']:.1f} hr(s)"))
-                self.table.setItem(row, 3, QTableWidgetItem(str(data['completed'])))
-                self.table.setItem(row, 4, QTableWidgetItem(str(data['pending'])))
+                self.table.setItem(row, 3, QTableWidgetItem(f"-{data['absent_hours']:.1f} hr(s)"))
+                self.table.setItem(row, 4, QTableWidgetItem(str(data['completed'])))
+                self.table.setItem(row, 5, QTableWidgetItem(str(data['pending'])))
                 
         except Exception as e:
             logging.error(f"Failed to load statistics: {e}")
@@ -1396,16 +1545,19 @@ class MainWindow(QMainWindow):
         btn_registry = QPushButton("Worker Registry")
         btn_planner = QPushButton("Weekly Shift Plan")
         btn_timesheet = QPushButton("Employee Timesheet")
+        btn_overview = QPushButton("Weekly Operational Overview")
         btn_stats = QPushButton("Statistics")
         
         btn_registry.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(0))
         btn_planner.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(1))
         btn_timesheet.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(2))
-        btn_stats.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(3))
+        btn_overview.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(3))
+        btn_stats.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(4))
         
         sidebar_layout.addWidget(btn_registry)
         sidebar_layout.addWidget(btn_planner)
         sidebar_layout.addWidget(btn_timesheet)
+        sidebar_layout.addWidget(btn_overview)
         sidebar_layout.addWidget(btn_stats)
         
         # Stacked Widget to hold different views
@@ -1413,10 +1565,12 @@ class MainWindow(QMainWindow):
         self.worker_registry = WorkerRegistry()
         self.shift_planner = ShiftPlanner()
         self.timesheet_widget = EmployeeTimesheet()
+        self.overview_widget = WeeklyOperationalOverview()
         self.stats_widget = StatisticsWidget()
         self.stacked_widget.addWidget(self.worker_registry)
         self.stacked_widget.addWidget(self.shift_planner)
         self.stacked_widget.addWidget(self.timesheet_widget)
+        self.stacked_widget.addWidget(self.overview_widget)
         self.stacked_widget.addWidget(self.stats_widget)
         self.update_week_label()
         
@@ -1439,6 +1593,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'shift_planner'):
             self.shift_planner.update_dates(self.current_date)
             self.shift_planner.load_shifts()
+        if hasattr(self, 'overview_widget'):
+            self.overview_widget.update_dates(self.current_date)
+            self.overview_widget.load_shifts()
 
     def open_calendar(self):
         dialog = CalendarDialog(self)
@@ -1451,6 +1608,7 @@ if __name__ == '__main__':
     api_thread = threading.Thread(target=run_server, daemon=True)
     api_thread.start()
 
+    # TODO: Add a startup retry mechanism or wait screen to handle the Flask server startup race condition.
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
